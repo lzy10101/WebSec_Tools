@@ -1,222 +1,213 @@
 #所有的工具路径根据subprocess命令自定义修改
 import sqlite3
 import subprocess
+import logging
+import shlex
+import sys
+import re
+from pathlib import Path
+from dataclasses import dataclass
+from typing import List, Optional
 from urllib.parse import urlparse
+from concurrent.futures import ThreadPoolExecutor
 
-##链路1：：：-------------------------------------------------------------------------------------------------------------------------------
-##基本信息收集
-def passive_info_collection(domain_file, subfinder_txt_file, oneforall_txt_file, httpx_txt_file, naabu_txt_file, katana_txt_file, uro_txt_file, xss_txt_file, sqli_txt_file, ssrf_txt_file, redirect_txt_file, rce_txt_file):
-    #第一部分： 子域名收集（oneforall、subfinder）【result_1_oneforall.txt、result_1_subfinder.txt】；
-    # subfinder收集子域名
-    command_subfinder = f'./subfinder/subfinder -dL {domain_file}  -o {subfinder_txt_file}'
-    try:
-        subprocess.run(command_subfinder, shell=True)
-    except Exception as e:
-        print("An unexpected error occurred:\n", str(e))
-    # oneforall收集子域名
-    command_oneforall = f'python3 ./OneForAll/oneforall.py --targets {domain_file} run'
-    try:
-        subprocess.run(command_oneforall, shell=True)
-    except Exception as e:
-        print("An unexpected error occurred:\n", str(e))
-    # 获取主域名个数
-    count = sum(1 for _ in open(domain_file))
-    conn = sqlite3.connect("./OneForAll/results/result.sqlite3")
-    cursor = conn.cursor()
-    domain_url = []
-    try:
-        # 获取所有表名
-        cursor.execute("SELECT name FROM sqlite_master WHERE type = 'table';")
-        table_name = cursor.fetchall()
-    except:
-        pass
-    finally:
-        # 获取给定主域名对应的子域名
-        for tb_name in table_name[-count:]:
-            sql = "SELECT url FROM '%s' where port = 443" % (tb_name)
-            cursor.execute(sql)
-            rows = cursor.fetchall()
-            for urls in rows:
-                domain_url.append(urls[0])
-    cursor.close()
-    conn.close()
-    try:
-        with open(oneforall_txt_file, "w") as file:
-            for item in domain_url:
-                # 解析 URL 并提取 netloc 部分
-                parsed_url = urlparse(item)
-                domain = parsed_url.netloc
-                file.write(f"{domain}\n")
-    except Exception as e:
-        print(f"An error occurred: {e}")
+# === 配置类 ===
+@dataclass
+class ScannerConfig:
+    project_name: str
+    base_dir: Path = Path("./scan_project")
+    tool_dir: Path = Path("./tools")
+    
+    def __post_init__(self):
+        self.validate_project_name()
+        self.project_dir = self.base_dir / self.project_name
+        self.project_dir.mkdir(parents=True, exist_ok=True)
+        
+        # 工具路径
+        self.subfinder = self.tool_dir / "subfinder"
+        self.oneforall = self.tool_dir / "OneForAll/oneforall.py"
+        self.httpx = self.tool_dir / "httpx/httpx"
+        self.nuclei = self.tool_dir / "nuclei/nuclei"
+        self.anew = self.tool_dir / "anew/anew"
+        
+        # 链路1文件
+        self.domain_file = self.project_dir / "domain.txt"
+        self.subfinder_out = self.project_dir / "result_1_subfinder.txt"
+        self.oneforall_out = self.project_dir / "result_1_oneforall.txt"
+        self.httpx_out = self.project_dir / "result_1_httpx.txt"
+        self.uro_out = self.project_dir / "result_1_uro.txt"
+        
+        # 其他路径根据需要添加...
 
-    # 将result_1_subfinder.txt与result_1_oneforall.txt的内容取并集，将并集保存在result_1_oneforall.txt
-    command = f'cat {subfinder_txt_file} | ./anew/anew {oneforall_txt_file}'
-    try:
-        subprocess.run(command, shell=True, text=True)
-    except Exception as e:
-        print("An unexpected error occurred:\n", str(e))    # 最终合并后的结果保存在result_1_oneforall.txt中
+    def validate_project_name(self):
+        if not re.match(r"^[\w-]+$", self.project_name):
+            raise ValueError("Invalid project name. Only alphanumeric, underscores and hyphens allowed.")
 
+# === 基础类 ===
+class BaseScanner:
+    def __init__(self, config: ScannerConfig):
+        self.config = config
+        self.logger = logging.getLogger(self.__class__.__name__)
+        
+    def run_cmd(self, command: str, check: bool = True) -> bool:
+        """安全执行shell命令"""
+        try:
+            result = subprocess.run(
+                command,
+                shell=True,
+                check=check,
+                capture_output=True,
+                text=True,
+                executable='/bin/bash' if sys.platform != 'win32' else None
+            )
+            if result.returncode != 0:
+                self.logger.error(f"命令执行失败: {command}\n错误: {result.stderr}")
+                return False
+            return True
+        except subprocess.CalledProcessError as e:
+            self.logger.error(f"命令返回非零状态码: {e.cmd}\n错误码: {e.returncode}")
+            return False
+        except Exception as e:
+            self.logger.exception(f"执行命令时发生意外错误: {command}")
+            return False
 
-    #第二部分： httpx子域名存活检查【result_2_httpx.txt】；
-    httpx_cmd = f"cat {oneforall_txt_file} | ./httpx/httpx > {httpx_txt_file}"
-    subprocess.run(
-        httpx_cmd,
-        shell=True,
-    )
+# === 信息收集模块 ===
+class PassiveCollector(BaseScanner):
+    def collect_subdomains(self):
+        """收集子域名"""
+        # 使用subfinder
+        cmd = f"{self.config.subfinder} -dL {self.config.domain_file} -o {self.config.subfinder_out}"
+        if not self.run_cmd(cmd):
+            raise RuntimeError("Subfinder执行失败")
+        
+        # 使用OneForAll
+        cmd = f"python3 {self.config.oneforall} --targets {self.config.domain_file} run"
+        if not self.run_cmd(cmd):
+            raise RuntimeError("OneForAll执行失败")
+        
+        self._process_oneforall_results()
 
-    #第三部分： 存活子域名端口扫描【result_3_naabu.txt】；
-    #command = f'cat {httpx_txt_file} | ./naabu/naabu -o {naabu_txt_file} -p 1-65535  -silent'
-    #try:
-        #subprocess.run(command, shell=True, text=True)
-    #except Exception as e:
-        #print("An unexpected error occurred:\n", str(e))
+    def _process_oneforall_results(self):
+        """处理OneForAll的数据库结果"""
+        db_path = self.config.tool_dir / "OneForAll/results/result.sqlite3"
+        try:
+            conn = sqlite3.connect(db_path)
+            cursor = conn.cursor()
+            
+            # 获取主域名数量
+            with open(self.config.domain_file) as f:
+                domain_count = sum(1 for _ in f)
+            
+            cursor.execute("SELECT name FROM sqlite_master WHERE type='table';")
+            tables = [t[0] for t in cursor.fetchall()[-domain_count:]]
+            
+            domains = []
+            for table in tables:
+                cursor.execute(f"SELECT url FROM '{table}' WHERE port=443")
+                domains.extend(urlparse(row[0]).netloc for row in cursor.fetchall())
+            
+            with open(self.config.oneforall_out, "w") as f:
+                f.write("\n".join(domains))
+                
+        except sqlite3.Error as e:
+            self.logger.error(f"数据库错误: {str(e)}")
+            raise
+        finally:
+            conn.close()
 
-    #第四部分： 4、存活子域名进行爬虫收集url信息【result_4_katana.txt】；
-    katana_cmd = f"cat {httpx_txt_file} | ./katana/katana -o {katana_txt_file} -d 5"
-    subprocess.run(
-        katana_cmd,
-        shell=True
-    )
-    gau_cmd = f"cat {httpx_txt_file} | gau --threads 50 >> {katana_txt_file}"
-    subprocess.run(
-        gau_cmd,
-        shell=True
-    )
-    uro_cmd = f"cat {katana_txt_file} | uro -o {uro_txt_file}"
-    subprocess.run(
-        uro_cmd,
-        shell=True
-    )
+        # 合并结果
+        merge_cmd = f"cat {self.config.subfinder_out} | {self.config.anew} {self.config.oneforall_out}"
+        if not self.run_cmd(merge_cmd):
+            raise RuntimeError("结果合并失败")
 
-    #第五部分： 5、gf过滤出xss、sqli、ssrf、redirect、xxe、rce链接
-    xss_cmd = f"cat {uro_txt_file} | gf xss > {xss_txt_file}"
-    sqli_cmd = f"cat {uro_txt_file} | gf sqli > {sqli_txt_file}"
-    ssrf_cmd = f"cat {uro_txt_file} | gf ssrf > {ssrf_txt_file}"
-    redirect_cmd = f"cat {uro_txt_file} | gf redirect > {redirect_txt_file}"
-    rce_cmd = f"cat {uro_txt_file} | gf rce > {rce_txt_file}"
-    subprocess.run(xss_cmd, shell=True)
-    subprocess.run(sqli_cmd, shell=True)
-    subprocess.run(ssrf_cmd, shell=True)
-    subprocess.run(redirect_cmd, shell=True)
-    subprocess.run(rce_cmd, shell=True)
+    def check_alive_domains(self):
+        """使用httpx检查存活域名"""
+        cmd = f"cat {self.config.oneforall_out} | {self.config.httpx} -silent > {self.config.httpx_out}"
+        if not self.run_cmd(cmd):
+            raise RuntimeError("HTTPX执行失败")
 
-##链路2：：：-------------------------------------------------------------------------------------------------------------------------------
-##基础配置扫描
-def scan_configuration(httpx_txt_file, cors_json_file, crlf_txt_file, dirsearch_txt_file, nuclei_txt_file):
-    # 输入：result_httpx.txt  输出：result_cors.txt, result_crlfuzz.txt, result_dirsearch.txt, result_nuclei.txt
+# === 配置扫描模块 ===
+class ConfigScanner(BaseScanner):
+    def scan_cors(self):
+        """扫描CORS配置"""
+        cors_out = self.config.project_dir / "result_2_cors.json"
+        cmd = f"cat {self.config.httpx_out} | python3 {self.config.tool_dir}/corsy/corsy.py -o {cors_out}"
+        self.run_cmd(cmd, check=False)  # 允许非关键任务失败
 
-    #第一部分：：：cors扫描
-    cmd = f"cat {httpx_txt_file} | python3 ./corsy/corsy.py  -o {cors_json_file}"
-    subprocess.run(
-        cmd,
-        shell=True,
-    )
+    def scan_directories(self):
+        """目录扫描"""
+        dirsearch_out = self.config.project_dir / "result_2_dirsearch.txt"
+        cmd = f"python3 {self.config.tool_dir}/dirsearch/dirsearch.py -l {self.config.httpx_out} -o {dirsearch_out}"
+        self.run_cmd(cmd, check=False)
 
-    #第二部分：：：crlf扫描，为啥扫描vulhub的nginx漏洞（crlf）扫描不出结果
-    cmd = f"cat  {httpx_txt_file} | ./crlfuzz/crlfuzz -o {crlf_txt_file}"
-    subprocess.run(
-        cmd,
-        shell=True,
-    )
+# === 漏洞扫描模块 ===
+class VulnerabilityScanner(BaseScanner):
+    def run_gf_scans(self):
+        """并行执行GF扫描"""
+        cmds = [
+            f"cat {self.config.uro_out} | gf xss > {self.config.project_dir}/result_1_xss.txt",
+            f"cat {self.config.uro_out} | gf sqli > {self.config.project_dir}/result_1_sqli.txt",
+            # 添加其他GF扫描命令...
+        ]
+        
+        with ThreadPoolExecutor() as executor:
+            futures = [executor.submit(self.run_cmd, cmd) for cmd in cmds]
+            for future in futures:
+                future.result()  # 等待所有任务完成
 
-    #第三部分：：：dirsearch扫描,,,或者有新的wordlist，可以指定wordlist单独扫描 auth/jwt/register auth-demo/register/classic auth-demo/register/modern
-    cmd = f"python3 ./dirsearch/dirsearch.py -l {httpx_txt_file} -o {dirsearch_txt_file}"
-    subprocess.run(
-        cmd,
-        shell=True,
-    )
+# === 主程序 ===
+class ScanManager:
+    def __init__(self, project_name: str):
+        self.config = ScannerConfig(project_name)
+        self.logger = logging.getLogger("ScanManager")
+        
+        # 初始化扫描器
+        self.collector = PassiveCollector(self.config)
+        self.config_scanner = ConfigScanner(self.config)
+        self.vuln_scanner = VulnerabilityScanner(self.config)
+        
+    def setup_logging(self):
+        logging.basicConfig(
+            level=logging.INFO,
+            format="%(asctime)s - %(name)s - %(levelname)s - %(message)s",
+            handlers=[
+                logging.FileHandler(self.config.project_dir / "scan.log"),
+                logging.StreamHandler()
+            ]
+        )
 
-    #第四部分：：：nuclei扫描
-    cmd = f"cat {httpx_txt_file} | ./nuclei/nuclei  -o {nuclei_txt_file}"  #-es info, low -ept ssl,dns
-    subprocess.run(
-        cmd,
-        shell=True,
-    )
+    def run_full_scan(self):
+        """执行完整扫描流程"""
+        self.logger.info("=== 开始安全扫描 ===")
+        
+        try:
+            # 链路1：信息收集
+            self.logger.info("步骤1/4：子域名收集")
+            self.collector.collect_subdomains()
+            self.logger.info("步骤2/4：存活检测")
+            self.collector.check_alive_domains()
+            
+            # 链路2：配置扫描
+            self.logger.info("步骤3/4：配置扫描")
+            self.config_scanner.scan_cors()
+            self.config_scanner.scan_directories()
+            
+            # 链路3：漏洞扫描
+            self.logger.info("步骤4/4：漏洞扫描")
+            self.vuln_scanner.run_gf_scans()
+            
+        except Exception as e:
+            self.logger.critical(f"扫描终止: {str(e)}")
+            sys.exit(1)
+            
+        self.logger.info("=== 扫描完成 ===")
 
-##链路3：：：-------------------------------------------------------------------------------------------------------------------------------
-##gf过滤出uro文件中的链接，来扫描sqli、xss、openredirect
-def uro_gf_scan(uro_txt_file, sqlmap_txt_dir, dalfox_txt_file, openredirect_txt_file):
-    # 链路3：：：扫描gf过滤出的链接
-    # 输入：result_uro_bak.txt gf过滤链接 输出：result_sqlmap.txt, result_xss.txt, result_ssrf.txt, result_openredirect.txt, result_nuclei.txt
-
-    #sqlmap扫描
-    uro_sqli_cmd = f"cat {uro_txt_file} | gf sqli | python3 ./sqlmap/sqlmap.py --random-agent --batch --answers 'others=y,already=n' --flush-session -v 0 --tamper=space2comment --time-sec=5  --proxy http://127.0.0.1:8086 --output-dir={sqlmap_txt_dir}"
-    subprocess.run(
-        uro_sqli_cmd,
-        shell=True,
-    )
-
-    # xss扫描   cat urls.txt | gf xss | ./dalfox pipe -o result.txt
-    ruo_xss_cmd = f"cat {uro_txt_file} | gf xss | ./dalfox/dalfox pipe -o {dalfox_txt_file}"
-    subprocess.run(
-        ruo_xss_cmd,
-        shell=True,
-    )
-
-    #openredirect扫描  cat ../scan_project/codemao_cn/result_katana_bak.txt | openredirex -p payloads.txt > result_openredirect.txt
-    ruo_redirect_cmd = f"cat {uro_txt_file} | gf redirect | openredirex -p ./OpenRedireX/payloads.txt > {openredirect_txt_file}"
-    subprocess.run(
-        ruo_redirect_cmd,
-        shell=True,
-    )
-
-##链路4：：：-------------------------------------------------------------------------------------------------------------------------------
-#把katana爬取到的链接过滤出js文件，nuclei扫描这些js文件
-def js_scan(uro_txt_file, js_txt_file):
-
-    js_cmd = f"cat {uro_txt_file} | grep '\.js$' | ./nuclei/nuclei -es info,low -ept ssl,dns -o {js_txt_file}"
-    subprocess.run(js_cmd,shell=True)
-
-##链路5：：：-------------------------------------------------------------------------------------------------------------------------------
-#指定nuclei模版（如xss、openredirect、ssrf）来进行nuclei扫描
-
-if __name__ == '__main__':
-    banner = '''
-                    TOOL
-===========================================
-| [1] passive_info_collection             |
-| [2] scan_configuration                  |
-| [3] uro_gf_scan                         |
-| [4] js_scan                             |
-==========================================='''
-    print(banner)
-
-    project_path = 'byteplus'
-    domain_file = f'./scan_project/{project_path}/domain.txt'   # 链路一输入的域名列表文件
-    subfinder_txt_file = f'./scan_project/{project_path}/result_1_subfinder.txt'  # 链路一保存subfinder子域名文件
-    oneforall_txt_file = f'./scan_project/{project_path}/result_1_oneforall.txt'  # 链路一保存oneforall子域名文件
-    httpx_txt_file = f'./scan_project/{project_path}/result_1_httpx.txt'    # 链路一保存httpx存活域名
-    naabu_txt_file = f'./scan_project/{project_path}/result_1_naabu.txt'     # 链路一保存域名的端口扫描信息
-    katana_txt_file = f'./scan_project/{project_path}/result_1_katana.txt'    # 链路一保存的存活域名爬虫后链接
-    uro_txt_file = f'./scan_project/{project_path}/result_1_uro.txt'    # 链路一保存的存活域名爬虫链接经过uro处理的结果
-    xss_txt_file = f'./scan_project/{project_path}/result_1_xss_input.txt'   #链路一保存的gf过滤的xss待扫描链接
-    sqli_txt_file = f'./scan_project/{project_path}/result_1_sqli_input.txt'  #链路一保存的gf过滤的sqli待扫描链接
-    ssrf_txt_file = f'./scan_project/{project_path}/result_1_ssrf_input.txt'   #链路一保存的gf过滤的ssrf待扫描链接
-    redirect_txt_file = f'./scan_project/{project_path}/result_1_redirect_input.txt'   #链路一保存的gf过滤的redirect待扫描链接
-    rce_txt_file = f'./scan_project/{project_path}/result_1_rce_input.txt'    #链路一保存的gf过滤的rce待扫描链接
-
-    cors_json_file = f'./scan_project/{project_path}/result_2_cors.json'   # 链路二保存的httpx存活域名cors扫描结果
-    crlf_txt_file = f'./scan_project/{project_path}/result_2_crlf.txt'      # 链路二保存的httpx存活域名crlf扫描结果
-    dirsearch_txt_file = f'./scan_project/{project_path}/result_2_dirsearch.txt'    # 链路二保存的httpx存活域名web路径扫描结果
-    nuclei_txt_file = f'./scan_project/{project_path}/result_2_nuclei.txt'         # 链路二保存的httpx存活域名nuclei扫描结果
-
-    sqlmap_txt_dir = f'./scan_project/{project_path}/result_3_sqlmap_dir'        # 链路三保存的gf过滤后链接的sqlmap扫描结果
-    dalfox_txt_file = f'./scan_project/{project_path}/result_3_dalfox.txt'     # 链路三保存的gf过滤后链接的xss扫描结果
-    openredirect_txt_file = f'./scan_project/{project_path}/result_3_openredirect.txt'     # 链路三保存的gf过滤后链接的openredirect扫描结果
-
-    js_txt_file = f'./scan_project/{project_path}/result_4_js.txt'      #链路四保存的js扫描结果
-
-    input = input("select an option (1-4):\n")
-    #链路1
-    if input == "1":
-        passive_info_collection(domain_file, subfinder_txt_file, oneforall_txt_file, httpx_txt_file, naabu_txt_file, katana_txt_file, uro_txt_file, xss_txt_file, sqli_txt_file, ssrf_txt_file, redirect_txt_file, rce_txt_file)
-    #链路2
-    elif input == "2":
-        scan_configuration(httpx_txt_file, cors_json_file, crlf_txt_file, dirsearch_txt_file, nuclei_txt_file)
-    #链路3
-    elif input == "3":
-        uro_gf_scan(uro_txt_file, sqlmap_txt_dir, dalfox_txt_file, openredirect_txt_file)
-    #链路4
-    elif input == "4":
-        js_scan(uro_txt_file, js_txt_file)
+if __name__ == "__main__":
+    if len(sys.argv) != 2:
+        print("用法: python scanner.py <project_name>")
+        sys.exit(1)
+    
+    project = sys.argv[1]
+    manager = ScanManager(project)
+    manager.setup_logging()
+    manager.run_full_scan()
