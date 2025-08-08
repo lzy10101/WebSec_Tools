@@ -8,6 +8,7 @@
         subfinder 是一款大型的子域名收集工具,通过调用大量在线资源来被动发现合法的子域名
     - assetfinder    eg--->./assetfinder ***.com > domain.txt
         assetfinder 是一种基于 Go 的工具，用于从各种来源（包括 Facebook、ThreatCrowd、Virustotal 等）中查找可能与给定域相关的相关域和子域。
+    - dnsub        可自定义扫描字典、域名前缀等
 ## ·端口扫描工具：
     - naabu    eg--->./naabu -host ***.***.***.***
         Naabu 是一款用 Go 编写的端口扫描工具，可让您快速可靠地枚举主机的有效端口
