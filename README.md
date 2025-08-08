@@ -96,7 +96,20 @@
     - SecLists
         SecLists 是安全测试人员的好帮手。它是安全评估期间使用的多种列表类型的集合，收集在一个地方。列表类型包括用户名、密码、URL、敏感数据模式、模糊测试负载、Web Shell 等等。
 -------------------------------------------------------
+
+# APP测试工具
+-------------------------------------------------------
+## MobSF
+    - https://github.com/MobSF/Mobile-Security-Framework-MobSF
+-------------------------------------------------------
+
+# 内网安全测试工具
+-------------------------------------------------------
+    - https://gobies.org/
+-------------------------------------------------------
+
 # pikachu靶场测试：
+-------------------------------------------------------
 ## 1、ssrf漏洞
     提前在collaborator生成一个域名，放入openredirex的payloads.txt中，执行命令：
     echo 'http://localhost:8765/vul/urlredirect/urlredirect.php?url=unsafere.php' | openredirex -p payloads.txt
@@ -122,5 +135,4 @@
 ## 4、xxe漏洞
     手工测试，目前没有发现好用的工具
     payload：https://github.com/payloadbox/xxe-injection-payload-list/tree/master/Intruder
-
-    
+-------------------------------------------------------
